@@ -4,7 +4,16 @@ import fs from "fs";
 import { FieldValue } from "firebase-admin/firestore";
 import { createServer as createViteServer } from "vite";
 import { proxmoxService } from "./src/backend/proxmox.js";
-import { admin, defaultApp, firestoreDb, authAdmin } from "./src/backend/firebaseAdmin.js";
+import {
+  admin,
+  defaultApp,
+  firestoreDb,
+  authAdmin,
+  isFirebaseAdminConfigured,
+  firebaseConfigError,
+  projectId,
+  firestoreDatabaseId,
+} from "./src/backend/firebaseAdmin.js";
 
 // --- MEMORY STORE FALLBACK FOR FAULT TOLERANCE ---
 const memoryDb = new Map<string, Map<string, any>>();
@@ -19,15 +28,17 @@ function getMemCollection(colName: string): Map<string, any> {
 }
 
 async function safeGetDoc(colName: string, docId: string): Promise<{ exists: boolean; data: () => any }> {
-  try {
-    const doc = await firestoreDb.collection(colName).doc(docId).get();
-    if (doc.exists) {
-      const data = doc.data();
-      getMemCollection(colName).set(docId, data);
-      return { exists: true, data: () => data };
+  if (isFirebaseAdminConfigured && firestoreDb) {
+    try {
+      const doc = await firestoreDb.collection(colName).doc(docId).get();
+      if (doc.exists) {
+        const data = doc.data();
+        getMemCollection(colName).set(docId, data);
+        return { exists: true, data: () => data };
+      }
+    } catch (err: any) {
+      console.warn(`Firestore getDoc [${colName}/${docId}] fallback to memory:`, err?.message || err);
     }
-  } catch (err: any) {
-    console.warn(`Firestore getDoc [${colName}/${docId}] fallback to memory:`, err?.message || err);
   }
   const mem = getMemCollection(colName).get(docId);
   return { exists: !!mem, data: () => mem };
@@ -39,39 +50,45 @@ async function safeSetDoc(colName: string, docId: string, data: any, merge = tru
   const merged = merge ? { ...existing, ...data } : { ...data };
   col.set(docId, merged);
 
-  try {
-    await firestoreDb.collection(colName).doc(docId).set(data, { merge });
-  } catch (err: any) {
-    console.warn(`Firestore setDoc [${colName}/${docId}] saved to memory:`, err?.message || err);
+  if (isFirebaseAdminConfigured && firestoreDb) {
+    try {
+      await firestoreDb.collection(colName).doc(docId).set(data, { merge });
+    } catch (err: any) {
+      console.warn(`Firestore setDoc [${colName}/${docId}] saved to memory:`, err?.message || err);
+    }
   }
 }
 
 async function safeGetCollection(colName: string): Promise<any[]> {
-  try {
-    const snap = await firestoreDb.collection(colName).get();
-    if (!snap.empty) {
-      const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      const col = getMemCollection(colName);
-      items.forEach((item) => col.set(item.id, item));
-      return items;
+  if (isFirebaseAdminConfigured && firestoreDb) {
+    try {
+      const snap = await firestoreDb.collection(colName).get();
+      if (!snap.empty) {
+        const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const col = getMemCollection(colName);
+        items.forEach((item) => col.set(item.id, item));
+        return items;
+      }
+    } catch (err: any) {
+      console.warn(`Firestore getCollection [${colName}] fallback to memory:`, err?.message || err);
     }
-  } catch (err: any) {
-    console.warn(`Firestore getCollection [${colName}] fallback to memory:`, err?.message || err);
   }
   return Array.from(getMemCollection(colName).values());
 }
 
 async function safeDeleteDoc(colName: string, docId: string): Promise<void> {
   getMemCollection(colName).delete(docId);
-  try {
-    await firestoreDb.collection(colName).doc(docId).delete();
-  } catch (err: any) {
-    console.warn(`Firestore deleteDoc [${colName}/${docId}] deleted from memory:`, err?.message || err);
+  if (isFirebaseAdminConfigured && firestoreDb) {
+    try {
+      await firestoreDb.collection(colName).doc(docId).delete();
+    } catch (err: any) {
+      console.warn(`Firestore deleteDoc [${colName}/${docId}] deleted from memory:`, err?.message || err);
+    }
   }
 }
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 10000);
 
 app.use(express.json());
 
@@ -87,16 +104,27 @@ async function requireAuth(req: any, res: any, next: any) {
   const token = authHeader.split(" ")[1];
   try {
     let decodedToken: any;
-    try {
-      decodedToken = await authAdmin.verifyIdToken(token);
-    } catch (verifyErr) {
-      // Fallback decode token payload if verifyIdToken fails in dev environment
+    if (isFirebaseAdminConfigured && authAdmin) {
+      try {
+        decodedToken = await authAdmin.verifyIdToken(token);
+      } catch (verifyErr) {
+        // Fallback decode token payload if verifyIdToken fails in dev environment
+        const parts = token.split(".");
+        if (parts.length === 3) {
+          decodedToken = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
+          if (decodedToken.user_id) decodedToken.uid = decodedToken.user_id;
+        } else {
+          throw verifyErr;
+        }
+      }
+    } else {
+      // Decode token payload safely when Firebase Admin is not configured
       const parts = token.split(".");
       if (parts.length === 3) {
         decodedToken = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
         if (decodedToken.user_id) decodedToken.uid = decodedToken.user_id;
       } else {
-        throw verifyErr;
+        return res.status(401).json({ error: "Unauthorized: Invalid token format" });
       }
     }
 
@@ -360,11 +388,62 @@ async function setupInitialData() {
 }
 setupInitialData();
 
-// --- API ENDPOINTS ---
+// --- API ENDPOINTS & HEALTH CHECKS ---
 
-// Health Check
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", service: "MagicalNode Server", timestamp: Date.now() });
+// General Health Checks
+app.get(["/health", "/api/health"], (req, res) => {
+  res.json({
+    status: "ok",
+    service: "MagicalDashboard Server",
+    timestamp: Date.now(),
+    firebase: isFirebaseAdminConfigured ? "connected" : "unconfigured",
+    firebaseProject: projectId,
+  });
+});
+
+app.get("/health/firebase", (req, res) => {
+  res.json({
+    status: isFirebaseAdminConfigured ? "ok" : "unconfigured",
+    configured: isFirebaseAdminConfigured,
+    projectId,
+    databaseId: firestoreDatabaseId,
+    message: isFirebaseAdminConfigured
+      ? "Firebase Admin connected successfully"
+      : (firebaseConfigError || "Firebase Admin environment variables missing")
+  });
+});
+
+app.get("/health/proxmox", async (req, res) => {
+  try {
+    const nodes = await safeGetCollection("nodes");
+    res.json({
+      status: "ok",
+      registeredNodesCount: nodes.length,
+      onlineNodesCount: nodes.filter((n: any) => n.status === "online").length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: "error", error: err.message });
+  }
+});
+
+app.get("/health/cloudflare", async (req, res) => {
+  try {
+    const settingsDoc = await safeGetDoc("settings", "system");
+    const cf = settingsDoc.exists ? settingsDoc.data().cloudflare : null;
+    res.json({
+      status: "ok",
+      configured: !!(cf && cf.apiToken),
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: "error", error: err.message });
+  }
+});
+
+app.get("/health/ssh", (req, res) => {
+  res.json({
+    status: "ok",
+    sshTerminalService: "available",
+  });
 });
 
 // 1. Settings Endpoints

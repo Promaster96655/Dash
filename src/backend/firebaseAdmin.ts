@@ -1,7 +1,7 @@
 import admin from "firebase-admin";
 import { initializeApp, cert, getApps, getApp, App } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
-import { getAuth } from "firebase-admin/auth";
+import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { getAuth, Auth } from "firebase-admin/auth";
 import fs from "fs";
 import path from "path";
 
@@ -21,51 +21,54 @@ function getLocalConfig() {
 const localConfig = getLocalConfig();
 
 // Resolve project ID, client email, and private key
-const projectId = process.env.FIREBASE_PROJECT_ID || localConfig.projectId || "magicaldashboard";
-const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+export const projectId = process.env.FIREBASE_PROJECT_ID || localConfig.projectId || "magicaldashboard";
+export const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
 const rawPrivateKey = process.env.FIREBASE_PRIVATE_KEY;
-const firestoreDatabaseId = process.env.FIREBASE_DATABASE_ID || localConfig.firestoreDatabaseId || "ai-studio-e4d83276-0ba5-406c-950a-8126fbfee8ef";
+export const firestoreDatabaseId = process.env.FIREBASE_DATABASE_ID || localConfig.firestoreDatabaseId || "ai-studio-e4d83276-0ba5-406c-950a-8126fbfee8ef";
 
 // Format multiline private key safely
-const privateKey = rawPrivateKey ? rawPrivateKey.replace(/\\n/g, "\n") : undefined;
+export const privateKey = rawPrivateKey ? rawPrivateKey.replace(/\\n/g, "\n") : undefined;
 
-let defaultApp: App;
+let defaultApp: App | null = null;
+let firestoreDb: Firestore | null = null;
+let authAdmin: Auth | null = null;
+let isFirebaseAdminConfigured = false;
+let firebaseConfigError: string | null = null;
 
-if (!getApps().length) {
-  // Safe startup validation
-  const missingVars: string[] = [];
-  if (!process.env.FIREBASE_PROJECT_ID && !localConfig.projectId) missingVars.push("Missing FIREBASE_PROJECT_ID");
-  if (!process.env.FIREBASE_CLIENT_EMAIL) missingVars.push("Missing FIREBASE_CLIENT_EMAIL");
-  if (!process.env.FIREBASE_PRIVATE_KEY) missingVars.push("Missing FIREBASE_PRIVATE_KEY");
-
-  if (missingVars.length > 0) {
-    console.warn("[Firebase Admin Startup Validation Warning]:");
-    missingVars.forEach((msg) => console.warn(`  - ${msg}`));
-    console.warn("For Render deployments, please set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in Render Environment Settings.");
-  }
-
-  if (projectId && clientEmail && privateKey) {
-    console.log(`[Firebase Admin] Initializing with service account cert for project: ${projectId}`);
-    defaultApp = initializeApp({
-      credential: cert({
+if (clientEmail && privateKey) {
+  try {
+    if (!getApps().length) {
+      console.log(`[Firebase Admin] Initializing with service account cert for project: ${projectId}`);
+      defaultApp = initializeApp({
+        credential: cert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
         projectId,
-        clientEmail,
-        privateKey,
-      }),
-      projectId,
-    });
-  } else {
-    console.warn(`[Firebase Admin] Falling back to default app initialization for project: ${projectId}`);
-    defaultApp = initializeApp({
-      projectId,
-    });
+      });
+    } else {
+      defaultApp = getApp();
+    }
+    firestoreDb = getFirestore(defaultApp, firestoreDatabaseId);
+    authAdmin = getAuth(defaultApp);
+    isFirebaseAdminConfigured = true;
+    console.log(`[Firebase Admin] Connected successfully to project "${projectId}" (database: "${firestoreDatabaseId}")`);
+  } catch (err: any) {
+    firebaseConfigError = `Failed to initialize Firebase Admin: ${err?.message || err}`;
+    console.error(`[Firebase Admin Initialization Error]:`, firebaseConfigError);
   }
 } else {
-  defaultApp = getApp();
+  firebaseConfigError = "Firebase Admin configuration is missing. Please configure FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in Render Environment Variables.";
+  console.warn(`[Firebase Admin Notice]: ${firebaseConfigError}`);
 }
 
-// Initialize Firestore
-export const firestoreDb = getFirestore(defaultApp, firestoreDatabaseId);
-export const authAdmin = getAuth(defaultApp);
+export {
+  admin,
+  defaultApp,
+  firestoreDb,
+  authAdmin,
+  isFirebaseAdminConfigured,
+  firebaseConfigError,
+};
 
-export { admin, defaultApp };
