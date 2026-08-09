@@ -362,6 +362,11 @@ setupInitialData();
 
 // --- API ENDPOINTS ---
 
+// Health Check
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", service: "MagicalNode Server", timestamp: Date.now() });
+});
+
 // 1. Settings Endpoints
 app.get("/api/settings", async (req, res) => {
   try {
