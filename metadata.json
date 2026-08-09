@@ -1,0 +1,6 @@
+{
+  "name": "MagicalNode Dashboard",
+  "description": "Professional VPS Hosting and Proxmox VE Virtual Machine management dashboard powered by Firebase and a secure backend API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
