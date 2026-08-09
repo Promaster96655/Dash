@@ -1,33 +1,10 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import admin from "firebase-admin";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { getAuth } from "firebase-admin/auth";
+import { FieldValue } from "firebase-admin/firestore";
 import { createServer as createViteServer } from "vite";
 import { proxmoxService } from "./src/backend/proxmox.js";
-
-// Initialize Firebase Admin dynamically from firebase-applet-config.json
-let projectId = "magicaldashboard";
-let firestoreDatabaseId = "ai-studio-e4d83276-0ba5-406c-950a-8126fbfee8ef";
-
-try {
-  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-  if (fs.existsSync(configPath)) {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    if (config.projectId) projectId = config.projectId;
-    if (config.firestoreDatabaseId) firestoreDatabaseId = config.firestoreDatabaseId;
-  }
-} catch (err) {
-  console.warn("Failed to read firebase-applet-config.json, using defaults:", err);
-}
-
-// Default app is configured with the applet's Firebase project ID
-const defaultApp = admin.initializeApp({
-  projectId: projectId,
-});
-
-const firestoreDb = getFirestore(defaultApp, firestoreDatabaseId);
+import { admin, defaultApp, firestoreDb, authAdmin } from "./src/backend/firebaseAdmin.js";
 
 // --- MEMORY STORE FALLBACK FOR FAULT TOLERANCE ---
 const memoryDb = new Map<string, Map<string, any>>();
@@ -94,7 +71,7 @@ async function safeDeleteDoc(colName: string, docId: string): Promise<void> {
 }
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 app.use(express.json());
 
@@ -111,7 +88,7 @@ async function requireAuth(req: any, res: any, next: any) {
   try {
     let decodedToken: any;
     try {
-      decodedToken = await getAuth(defaultApp).verifyIdToken(token);
+      decodedToken = await authAdmin.verifyIdToken(token);
     } catch (verifyErr) {
       // Fallback decode token payload if verifyIdToken fails in dev environment
       const parts = token.split(".");
